@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 /* USER CODE END Includes */
 
@@ -71,27 +72,56 @@ static void MX_USART2_UART_Init(void);
 float read_internal_temperature(void)
 {
   uint32_t raw = 0;
-  float Vsense;
-  float temperature;
+  uint32_t vsenseMv = 0U;      /* Vsense em milivolts */
+  int32_t temperatureC_x100;   /* Temperatura em centésimos de grau Celsius */
 
   HAL_ADC_Start(&hadc1);
   HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
   raw = HAL_ADC_GetValue(&hadc1);
 
-  char buffer[15];
-  snprintf(buffer, sizeof(buffer), "RAW: %ld\r\n",raw);
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "RAW: %lu\r\n", (unsigned long)raw);
   HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
 
-  Vsense = (raw * 3.3f) / 4095.0f;
+  /*
+   * Cálculo em ponto fixo:
+   * Vsense [mV] = raw * 3300 / 4095
+   */
+  vsenseMv = (uint32_t)(((uint64_t)raw * 3300U) / 4095U);
 
-  snprintf(buffer, sizeof(buffer), "Vsense: %f\r\n", Vsense);
+  snprintf(buffer, sizeof(buffer), "Vsense: %lu mV\r\n", (unsigned long)vsenseMv);
   HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
-  const float V25 = 0.76f;
-  const float Avg_Slope = 0.0025f;
 
-  temperature = ((Vsense - V25) / Avg_Slope) + 25.0f;
+  /*
+   * Fórmula aproximada para o STM32F4 (modelo genérico ST):
+   * No F4 o Vsense DIMINUI com o aumento da temperatura.
+   * T(°C) = (V25 - Vsense) / Avg_Slope + 25
+   * com Vsense em volts, V25 = 0,76 V e Avg_Slope = 2,5 mV/°C.
+   * Em mV e ponto fixo em centésimos de grau:
+   * T100 = ((760 - Vsense_mV) * 40) + 2500
+   */
+  if (vsenseMv <= 760U)
+  {
+    temperatureC_x100 = (int32_t)((760U - vsenseMv) * 40U) + 2500;
+  }
+  else
+  {
+    temperatureC_x100 = 2500 - (int32_t)((vsenseMv - 760U) * 40U);
+  }
 
-  return temperature;
+  {
+    int32_t tempInt = temperatureC_x100 / 100;
+    int32_t tempFrac = temperatureC_x100 % 100;
+    if (tempFrac < 0)
+    {
+      tempFrac = -tempFrac;
+    }
+    snprintf(buffer, sizeof(buffer), "Temp: %ld.%02ld C\r\n",
+             (long)tempInt, (long)tempFrac);
+    HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
+  }
+
+  return (float)temperatureC_x100 / 100.0f;
 }
 
 /**
@@ -106,7 +136,20 @@ void print_temperature(void)
   char buffer[64];
   float temp = read_internal_temperature();
 
-  snprintf(buffer, sizeof(buffer), "Temperatura Interna: %.2f C\r\n", temp);
+  /*
+   * Evitar uso de %f no printf em ambientes sem suporte a ponto flutuante.
+   * Converte o valor retornado para centésimos de grau e imprime com inteiros.
+   */
+  int32_t tempC_x100 = (int32_t)(temp * 100.0f);
+  int32_t tempInt = tempC_x100 / 100;
+  int32_t tempFrac = tempC_x100 % 100;
+  if (tempFrac < 0)
+  {
+    tempFrac = -tempFrac;
+  }
+
+  snprintf(buffer, sizeof(buffer), "Temperatura Interna: %ld.%02ld C\r\n",
+           (long)tempInt, (long)tempFrac);
   HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), HAL_MAX_DELAY);
 }
 
@@ -247,7 +290,7 @@ static void MX_ADC1_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_TEMPSENSOR;
   sConfig.Rank = 1;
-  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
     Error_Handler();
